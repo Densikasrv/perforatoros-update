@@ -1,0 +1,92 @@
+#!/bin/bash
+set -e
+
+# 1. Проверка прав root
+if [ "$EUID" -ne 0 ]; then
+    echo "[!] Ошибка: утилита требует прав суперпользователя."
+    echo "Запустите команду так: sudo perforatoros-update"
+    exit 1
+fi
+
+# 2. Настройки GitHub
+GITHUB_USER="Deniskasrv"
+GITHUB_REPO="perforatoros-update"
+BRANCH="main"
+
+VERSION_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${BRANCH}/version.txt"
+MINT_INFO_FILE="/etc/linuxmint/info"
+TEMP_DIR=$(mktemp -d -t perforator-update-XXXXXX)
+
+cleanup() {
+    rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
+echo "=== Менеджер обновлений PerforatorOS CLI ==="
+
+# 3. Получение текущей версии из /etc/linuxmint/info
+if [ -f "$MINT_INFO_FILE" ]; then
+    LOCAL_VER=$(grep '^RELEASE=' "$MINT_INFO_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+else
+    LOCAL_VER="22.3"
+fi
+
+# 4. Проверка на раннюю версию 22.3 и выход
+if [ "$LOCAL_VER" == "22.3" ]; then
+    echo "[!] Вы используете раннюю версию PerforatorOS."
+    exit 0
+fi
+
+echo "Текущая версия системы: $LOCAL_VER"
+
+# 5. Проверка целевой версии на GitHub
+echo "[1/4] Проверка обновлений на сервере..."
+REMOTE_VER=$(curl -sSL --fail "$VERSION_URL" 2>/dev/null || echo "")
+
+if [ -z "$REMOTE_VER" ]; then
+    echo "[!] Ошибка: Не удалось получить данные с сервера ($VERSION_URL)."
+    exit 1
+fi
+
+echo "Актуальная версия на GitHub: $REMOTE_VER"
+
+if [ "$LOCAL_VER" == "$REMOTE_VER" ]; then
+    echo "[+] У вас уже установлена актуальная версия PerforatorOS ($LOCAL_VER)."
+    exit 0
+fi
+
+# 6. Динамическое имя файла (например, 202610update.tar.gz)
+ARCHIVE_NAME="${LOCAL_VER}update.tar.gz"
+ARCHIVE_URL="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${BRANCH}/${ARCHIVE_NAME}"
+
+# 7. Скачивание файла
+echo "[2/4] Загрузка файла обновления $ARCHIVE_NAME..."
+if ! curl -sSL --fail "$ARCHIVE_URL" -o "$TEMP_DIR/update.tar.gz" 2>/dev/null; then
+    echo "[!] Ошибка: Не удалось скачать $ARCHIVE_NAME с GitHub!"
+    echo "Проверьте, загружен ли архив обновления для версии $LOCAL_VER на сервер."
+    exit 1
+fi
+
+# 8. Распаковка в системный корень /
+echo "[3/4] Применение обновлений в корень системы (/)..."
+tar -xzf "$TEMP_DIR/update.tar.gz" -C /
+
+# 9. Запуск пост-скрипта (если присутствует в архиве)
+if [ -f "/tmp/perforator_post_install.sh" ]; then
+    echo "[4/4] Запуск пост-установочного скрипта..."
+    bash /tmp/perforator_post_install.sh
+    rm -f /tmp/perforator_post_install.sh
+else
+    echo "[4/4] Пост-скрипты не требуются."
+fi
+
+# 10. Запись новой версии в RELEASE
+if [ -f "$MINT_INFO_FILE" ]; then
+    if grep -q '^RELEASE=' "$MINT_INFO_FILE"; then
+        sed -i "s/^RELEASE=.*/RELEASE=$REMOTE_VER/" "$MINT_INFO_FILE"
+    else
+        echo "RELEASE=$REMOTE_VER" >> "$MINT_INFO_FILE"
+    fi
+fi
+
+echo "=== PerforatorOS успешно обновлена до версии $REMOTE_VER! ==="
