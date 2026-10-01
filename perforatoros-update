@@ -43,7 +43,7 @@ fi
 echo "Текущая версия системы: $LOCAL_VER"
 
 # 5. Проверка актуальной версии на GitHub
-echo "[1/4] Проверка обновлений на сервере..."
+echo "[1/5] Проверка обновлений на сервере..."
 REMOTE_VER=$(curl -sSL --fail "$VERSION_URL" 2>/dev/null || echo "")
 
 if [ -z "$REMOTE_VER" ]; then
@@ -59,11 +59,39 @@ if [ "$LOCAL_VER" == "$REMOTE_VER" ]; then
     exit 0
 fi
 
-# 6. Формирование ссылки и скачивание архива обновления
+# 6. Получение списка изменений и подтверждение пользователя
+echo "[2/5] Загрузка списка изменений..."
+CHANGELOG_URL="${BASE_URL}/${REMOTE_VER}changelog.txt"
+CHANGELOG_TEXT=$(curl -sSL --fail "$CHANGELOG_URL" 2>/dev/null || echo "")
+
+echo ""
+echo "=========================================="
+echo "          ЧТО НОВОГО В $REMOTE_VER         "
+echo "=========================================="
+if [ -n "$CHANGELOG_TEXT" ]; then
+    echo "$CHANGELOG_TEXT"
+else
+    echo "(Список изменений для версии $REMOTE_VER не предоставлен)"
+fi
+echo "=========================================="
+echo ""
+
+read -p "Желаете выполнить обновление до версии $REMOTE_VER? [y/N]: " CONFIRM
+case "$CONFIRM" in
+    [yY]|[yY][eE][sS])
+        echo "[+] Подтверждено. Начинаем установку..."
+        ;;
+    *)
+        echo "[!] Обновление отменено пользователем."
+        exit 0
+        ;;
+esac
+
+# 7. Формирование ссылки и скачивание архива обновления
 ARCHIVE_NAME="${LOCAL_VER}update.tar.gz"
 ARCHIVE_URL="${BASE_URL}/${ARCHIVE_NAME}"
 
-echo "[2/4] Загрузка обновления $ARCHIVE_NAME..."
+echo "[3/5] Загрузка обновления $ARCHIVE_NAME..."
 if ! curl -sSL --fail "$ARCHIVE_URL" -o "$TEMP_DIR/update.tar.gz" 2>/dev/null; then
     echo "[!] Ошибка: Не удалось скачать файл $ARCHIVE_NAME"
     echo "Убедитесь, что архив под версию $LOCAL_VER загружен в репозиторий:"
@@ -71,17 +99,17 @@ if ! curl -sSL --fail "$ARCHIVE_URL" -o "$TEMP_DIR/update.tar.gz" 2>/dev/null; t
     exit 1
 fi
 
-# 7. Распаковка архива в системный корень /
-echo "[3/4] Применение обновлений в корень системы (/)..."
+# 8. Распаковка архива в системный корень /
+echo "[4/5] Применение обновлений в корень системы (/)..."
 tar -xzf "$TEMP_DIR/update.tar.gz" -C /
 
-# 8. Выполнение пост-скрипта (если он входит в обновление)
+# 9. Выполнение пост-скрипта (если он входит в обновление)
 if [ -f "/tmp/perforator_post_install.sh" ]; then
-    echo "[4/4] Запуск пост-установочных скриптов..."
+    echo "[5/5] Запуск пост-установочных скриптов..."
     bash /tmp/perforator_post_install.sh
     rm -f /tmp/perforator_post_install.sh
 else
-    echo "[4/4] Пост-скрипты не требуются."
+    echo "[5/5] Пост-скрипты не требуются."
 fi
 
 echo "=== PerforatorOS успешно обновлена до версии $REMOTE_VER! ==="
