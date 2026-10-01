@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== Менеджер обновлений PerforatorOS CLI ==="
+echo "=== Менеджер обновлений PerforatorOS ==="
 
 # 3. Чтение текущей версии из /etc/linuxmint/info
 if [ -f "$MINT_INFO_FILE" ]; then
