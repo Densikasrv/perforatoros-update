@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Небольшая пауза после входа в систему, чтобы сеть успела подключиться
+sleep 15
+
+GITHUB_USER="Densikasrv"
+GITHUB_REPO="perforatoros-update"
+BRANCH="main"
+
+VERSION_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/raw/refs/heads/${BRANCH}/version.txt"
+MINT_INFO_FILE="/etc/linuxmint/info"
+
+# 1. Чтение текущей локальной версии
+if [ -f "$MINT_INFO_FILE" ]; then
+    LOCAL_VER=$(grep '^RELEASE=' "$MINT_INFO_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+else
+    exit 0
+fi
+
+# Пропуск для устаревших версий
+if [ "$LOCAL_VER" == "22.3" ]; then
+    exit 0
+fi
+
+# 2. Безопасная проверка актуальной версии на GitHub
+REMOTE_VER=$(curl -sSL --fail --connect-timeout 10 "$VERSION_URL" 2>/dev/null || echo "")
+
+# Если нет сети или сервер недоступен — просто тихо завершаем работу
+if [ -z "$REMOTE_VER" ]; then
+    exit 0
+fi
+
+# 3. Если версия новее — выводим всплывающее уведомление
+if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
+    notify-send -u normal \
+        -i system-software-update \
+        "PerforatorOS: Доступно обновление!" \
+        "Вышла новая версия $REMOTE_VER (у вас $LOCAL_VER).\nОткройте терминал и выполните: sudo perforatoros-update"
+fi
