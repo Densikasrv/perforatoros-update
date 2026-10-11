@@ -1,4 +1,10 @@
 #!/bin/bash
+# Уведомление о новой версии PerforatorOS (запускается из /etc/xdg/autostart/)
+
+# В live-сессии (загрузка с ISO) обновлять нечего, молчим
+if grep -q 'boot=casper' /proc/cmdline 2>/dev/null; then
+    exit 0
+fi
 
 # Небольшая пауза после входа в систему, чтобы сеть успела подключиться
 sleep 15
@@ -6,34 +12,51 @@ sleep 15
 GITHUB_USER="Densikasrv"
 GITHUB_REPO="perforatoros-update"
 BRANCH="main"
+BASE_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/raw/refs/heads/${BRANCH}"
 
-VERSION_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/raw/refs/heads/${BRANCH}/version.txt"
+# PerforatorOS Legacy (32-бит) смотрит в подкаталог legacy/
+if [ "$(dpkg --print-architecture 2>/dev/null)" = "i386" ]; then
+    BASE_URL="${BASE_URL}/legacy"
+fi
+
+VERSION_URL="${BASE_URL}/version.txt"
 MINT_INFO_FILE="/etc/linuxmint/info"
+VERSION_RE='^[0-9]+(\.[0-9]+)*$'
 
 # 1. Чтение текущей локальной версии
 if [ -f "$MINT_INFO_FILE" ]; then
-    LOCAL_VER=$(grep '^RELEASE=' "$MINT_INFO_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+    LOCAL_VER=$(grep -m 1 '^RELEASE=' "$MINT_INFO_FILE" | cut -d'=' -f2 | tr -d "\"' \r")
 else
     exit 0
 fi
 
-# Пропуск для устаревших версий
-if [ "$LOCAL_VER" == "22.3" ]; then
-    exit 0
-fi
+# Пропуск для ранних версий (без системы обновлений)
+case "$LOCAL_VER" in
+    ""|22.3|19.3) exit 0 ;;
+esac
+[[ "$LOCAL_VER" =~ $VERSION_RE ]] || exit 0
 
 # 2. Безопасная проверка актуальной версии на GitHub
-REMOTE_VER=$(curl -sSL --fail --connect-timeout 10 "$VERSION_URL" 2>/dev/null || echo "")
+REMOTE_VER=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]' || true)
 
-# Если нет сети или сервер недоступен — просто тихо завершаем работу
-if [ -z "$REMOTE_VER" ]; then
+# Если нет сети или сервер недоступен (или ответ некорректный), тихо завершаем работу
+[[ "$REMOTE_VER" =~ $VERSION_RE ]] || exit 0
+
+# 3. Уведомляем только если версия на сервере НОВЕЕ локальной
+dpkg --compare-versions "$REMOTE_VER" gt "$LOCAL_VER" || exit 0
+
+# Не повторяем уведомление о той же версии при каждом входе
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+STATE_FILE="$STATE_DIR/perforatoros-update-notified"
+if [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$REMOTE_VER" ]; then
     exit 0
 fi
 
-# 3. Если версия новее — выводим всплывающее уведомление
-if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-    notify-send -u normal \
-        -i system-software-update \
-        "PerforatorOS: Доступно обновление!" \
-        "Вышла новая версия $REMOTE_VER (у вас $LOCAL_VER).\nОткройте терминал и выполните: sudo perforatoros-update"
-fi
+BODY="Вышла новая версия $REMOTE_VER (у вас $LOCAL_VER)."$'\n'"Откройте терминал и выполните: sudo perforatoros-update"
+notify-send -u normal \
+    -i system-software-update \
+    "PerforatorOS: Доступно обновление!" \
+    "$BODY"
+
+mkdir -p "$STATE_DIR" 2>/dev/null && echo "$REMOTE_VER" > "$STATE_FILE" 2>/dev/null
+exit 0
