@@ -1,115 +1,221 @@
 #!/bin/bash
+# Менеджер обновлений PerforatorOS
+# Поддерживает основную линейку (amd64) и PerforatorOS Legacy (i386).
+# Переменная PERFORATOR_ROOT нужна только для тестов (по умолчанию /).
 set -e
 
-# 1. Проверка прав суперпользователя (root)
-if [ "$EUID" -ne 0 ]; then
-    echo "[!] Ошибка: утилита требует прав суперпользователя."
-    echo "Запустите команду так: sudo perforatoros-update"
-    exit 1
-fi
+main() {
+    # 1. Проверка прав суперпользователя (root)
+    if [ "$EUID" -ne 0 ]; then
+        echo "[!] Ошибка: утилита требует прав суперпользователя."
+        echo "Запустите команду так: sudo perforatoros-update"
+        exit 1
+    fi
 
-# 2. Настройки GitHub и ссылки
-GITHUB_USER="Densikasrv"
-GITHUB_REPO="perforatoros-update"
-BRANCH="main"
+    # Не даём запустить два обновления одновременно
+    exec 9>/var/lock/perforatoros-update.lock
+    if ! flock -n 9; then
+        echo "[!] Обновление уже выполняется другим процессом."
+        exit 1
+    fi
 
-BASE_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/raw/refs/heads/${BRANCH}"
-VERSION_URL="${BASE_URL}/version.txt"
-MINT_INFO_FILE="/etc/linuxmint/info"
+    # 2. Настройки GitHub и ссылки
+    GITHUB_USER="Densikasrv"
+    GITHUB_REPO="perforatoros-update"
+    BRANCH="main"
+    BASE_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/raw/refs/heads/${BRANCH}"
 
-# Создание временной папки
-TEMP_DIR=$(mktemp -d -t perforator-update-XXXXXX)
+    # PerforatorOS Legacy (32-бит) берёт всё из подкаталога legacy/,
+    # чтобы не получить архив, собранный для основной линейки.
+    ARCH=$(dpkg --print-architecture 2>/dev/null || echo "")
+    if [ "$ARCH" = "i386" ]; then
+        BASE_URL="${BASE_URL}/legacy"
+    fi
 
-cleanup() {
-    rm -rf "$TEMP_DIR"
-}
-trap cleanup EXIT
+    VERSION_URL="${BASE_URL}/version.txt"
+    ROOT_DIR="${PERFORATOR_ROOT:-/}"
+    MINT_INFO_FILE="${ROOT_DIR%/}/etc/linuxmint/info"
+    VERSION_RE='^[0-9]+(\.[0-9]+)*$'
 
-echo "=== Менеджер обновлений PerforatorOS ==="
+    # Создание временной папки
+    TEMP_DIR=$(mktemp -d -t perforator-update-XXXXXX)
+    trap 'rm -rf "$TEMP_DIR"' EXIT
 
-# 3. Чтение текущей версии из /etc/linuxmint/info
-if [ -f "$MINT_INFO_FILE" ]; then
-    LOCAL_VER=$(grep '^RELEASE=' "$MINT_INFO_FILE" | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-else
-    LOCAL_VER="22.3"
-fi
+    echo "=== Менеджер обновлений PerforatorOS ==="
 
-# 4. Проверка на раннюю версию 22.3
-if [ "$LOCAL_VER" == "22.3" ]; then
-    echo "[!] Вы используете раннюю версию PerforatorOS. Обновление невозможно."
-    exit 0
-fi
+    # 3. Чтение текущей версии из /etc/linuxmint/info
+    LOCAL_VER=$(get_release "$MINT_INFO_FILE")
 
-echo "Текущая версия системы: $LOCAL_VER"
+    if [ -z "$LOCAL_VER" ]; then
+        echo "[!] Не удалось определить текущую версию системы ($MINT_INFO_FILE)."
+        exit 1
+    fi
 
-# 5. Проверка актуальной версии на GitHub
-echo "[1/5] Проверка обновлений на сервере..."
-REMOTE_VER=$(curl -sSL --fail "$VERSION_URL" 2>/dev/null || echo "")
+    # 4. Проверка на раннюю версию (22.3 — основная линейка, 19.3 — Legacy)
+    case "$LOCAL_VER" in
+        22.3|19.3)
+            echo "[!] Вы используете раннюю версию PerforatorOS. Обновление невозможно."
+            exit 0
+            ;;
+    esac
 
-if [ -z "$REMOTE_VER" ]; then
-    echo "[!] Ошибка: Не удалось получить данные с сервера!"
-    echo "Проверьте подключение к интернету или доступность URL: $VERSION_URL"
-    exit 1
-fi
+    if ! [[ "$LOCAL_VER" =~ $VERSION_RE ]]; then
+        echo "[!] Неожиданный формат версии системы: $LOCAL_VER"
+        exit 1
+    fi
 
-echo "Актуальная версия на GitHub: $REMOTE_VER"
+    echo "Текущая версия системы: $LOCAL_VER"
 
-if [ "$LOCAL_VER" == "$REMOTE_VER" ]; then
-    echo "[+] У вас уже установлена актуальная версия PerforatorOS ($LOCAL_VER)."
-    exit 0
-fi
+    # 5. Проверка актуальной версии на GitHub
+    echo "[1/5] Проверка обновлений на сервере..."
+    REMOTE_VER=$(curl -fsSL --connect-timeout 15 --max-time 60 "$VERSION_URL" 2>/dev/null | tr -d '[:space:]' || true)
 
-# 6. Получение списка изменений и подтверждение пользователя
-echo "[2/5] Загрузка списка изменений..."
-CHANGELOG_URL="${BASE_URL}/${REMOTE_VER}changelog.txt"
-CHANGELOG_TEXT=$(curl -sSL --fail "$CHANGELOG_URL" 2>/dev/null || echo "")
+    if [ -z "$REMOTE_VER" ]; then
+        echo "[!] Ошибка: Не удалось получить данные с сервера!"
+        echo "Проверьте подключение к интернету или доступность URL: $VERSION_URL"
+        exit 1
+    fi
 
-echo ""
-echo "=========================================="
-echo "          ЧТО НОВОГО В $REMOTE_VER         "
-echo "=========================================="
-if [ -n "$CHANGELOG_TEXT" ]; then
-    echo "$CHANGELOG_TEXT"
-else
-    echo "(Список изменений для версии $REMOTE_VER не предоставлен)"
-fi
-echo "=========================================="
-echo ""
+    if ! [[ "$REMOTE_VER" =~ $VERSION_RE ]]; then
+        echo "[!] Ошибка: сервер вернул некорректную версию."
+        exit 1
+    fi
 
-read -p "Желаете выполнить обновление до версии $REMOTE_VER? [y/N]: " CONFIRM
-case "$CONFIRM" in
-    [yY]|[yY][eE][sS])
-        echo "[+] Подтверждено. Начинаем установку..."
-        ;;
-    *)
-        echo "[!] Обновление отменено пользователем."
+    echo "Актуальная версия на GitHub: $REMOTE_VER"
+
+    if [ "$LOCAL_VER" = "$REMOTE_VER" ]; then
+        echo "[+] У вас уже установлена актуальная версия PerforatorOS ($LOCAL_VER)."
         exit 0
-        ;;
-esac
+    elif ! dpkg --compare-versions "$REMOTE_VER" gt "$LOCAL_VER"; then
+        echo "[+] Ваша версия ($LOCAL_VER) новее версии на сервере ($REMOTE_VER). Обновление не требуется."
+        exit 0
+    fi
 
-# 7. Формирование ссылки и скачивание архива обновления
-ARCHIVE_NAME="${LOCAL_VER}update.tar.gz"
-ARCHIVE_URL="${BASE_URL}/${ARCHIVE_NAME}"
+    # 6. Получение списка изменений и подтверждение пользователя
+    echo "[2/5] Загрузка списка изменений..."
+    CHANGELOG_URL="${BASE_URL}/${REMOTE_VER}changelog.txt"
+    # Управляющие символы вырезаются, чтобы текст с сервера не мог менять вид терминала
+    CHANGELOG_TEXT=$(curl -fsSL --connect-timeout 15 --max-time 60 "$CHANGELOG_URL" 2>/dev/null | tr -d '\000-\010\013-\037\177' || true)
 
-echo "[3/5] Загрузка обновления $ARCHIVE_NAME..."
-if ! curl -sSL --fail "$ARCHIVE_URL" -o "$TEMP_DIR/update.tar.gz" 2>/dev/null; then
-    echo "[!] Ошибка: Не удалось скачать файл $ARCHIVE_NAME"
-    echo "Убедитесь, что архив под версию $LOCAL_VER загружен в репозиторий:"
-    echo "$ARCHIVE_URL"
-    exit 1
-fi
+    echo ""
+    echo "=========================================="
+    echo "          ЧТО НОВОГО В $REMOTE_VER         "
+    echo "=========================================="
+    if [ -n "$CHANGELOG_TEXT" ]; then
+        echo "$CHANGELOG_TEXT"
+    else
+        echo "(Список изменений для версии $REMOTE_VER не предоставлен)"
+    fi
+    echo "=========================================="
+    echo ""
 
-# 8. Распаковка архива в системный корень /
-echo "[4/5] Применение обновлений в корень системы (/)..."
-tar -xzf "$TEMP_DIR/update.tar.gz" -C /
+    read -r -p "Желаете выполнить обновление до версии $REMOTE_VER? [y/N]: " CONFIRM
+    case "$CONFIRM" in
+        [yY]|[yY][eE][sS])
+            echo "[+] Подтверждено. Начинаем установку..."
+            ;;
+        *)
+            echo "[!] Обновление отменено пользователем."
+            exit 0
+            ;;
+    esac
 
-# 9. Выполнение пост-скрипта (если он входит в обновление)
-if [ -f "/tmp/perforator_post_install.sh" ]; then
-    echo "[5/5] Запуск пост-установочных скриптов..."
-    bash /tmp/perforator_post_install.sh
-    rm -f /tmp/perforator_post_install.sh
-else
-    echo "[5/5] Пост-скрипты не требуются."
-fi
+    # 7. Скачивание архива обновления
+    ARCHIVE_NAME="${LOCAL_VER}update.tar.gz"
+    ARCHIVE_URL="${BASE_URL}/${ARCHIVE_NAME}"
+    ARCHIVE="$TEMP_DIR/update.tar.gz"
 
-echo "=== PerforatorOS успешно обновлена до версии $REMOTE_VER! ==="
+    echo "[3/5] Загрузка обновления $ARCHIVE_NAME..."
+    if ! curl -fsSL --retry 3 --connect-timeout 15 "$ARCHIVE_URL" -o "$ARCHIVE" 2>/dev/null; then
+        echo "[!] Ошибка: Не удалось скачать файл $ARCHIVE_NAME"
+        echo "Убедитесь, что архив под версию $LOCAL_VER загружен в репозиторий:"
+        echo "$ARCHIVE_URL"
+        exit 1
+    fi
+
+    # Контрольная сумма (необязательна: если файла .sha256 нет, проверка пропускается)
+    SHA_EXPECTED=$(curl -fsSL --connect-timeout 15 "${ARCHIVE_URL}.sha256" 2>/dev/null | awk '{print $1}' | head -n 1 || true)
+    if [ -n "$SHA_EXPECTED" ]; then
+        SHA_ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+        if [ "$SHA_EXPECTED" != "$SHA_ACTUAL" ]; then
+            echo "[!] Ошибка: контрольная сумма архива не совпадает. Обновление прервано."
+            exit 1
+        fi
+        echo "[+] Контрольная сумма архива совпала."
+    else
+        echo "[~] Контрольная сумма для архива не опубликована, проверка пропущена."
+    fi
+
+    # Проверка содержимого архива до распаковки
+    LIST="$TEMP_DIR/list.txt"
+    if ! tar -tzf "$ARCHIVE" > "$LIST" 2>/dev/null; then
+        echo "[!] Ошибка: архив повреждён или имеет неверный формат."
+        exit 1
+    fi
+    if grep -Eq '(^/|(^|/)\.\.(/|$))' "$LIST"; then
+        echo "[!] Ошибка: в архиве есть небезопасные пути (абсолютные или с \"..\"). Обновление прервано."
+        exit 1
+    fi
+
+    # Пост-скрипт берём из архива, но запускаем из личной временной папки,
+    # а не из общедоступного /tmp.
+    POST_MEMBER=$(grep -E '^(\./)?tmp/perforator_post_install\.sh$' "$LIST" | head -n 1 || true)
+    EXCLUDE_ARGS=()
+    if [ -n "$POST_MEMBER" ]; then
+        mkdir -p "$TEMP_DIR/post"
+        tar -xzf "$ARCHIVE" -C "$TEMP_DIR/post" "$POST_MEMBER"
+        EXCLUDE_ARGS=(--exclude="$POST_MEMBER")
+    fi
+
+    # Резервная копия заменяемых файлов (каталоги не копируем)
+    BACKUP_DIR="${ROOT_DIR%/}/var/backups/perforatoros"
+    BACKUP="$BACKUP_DIR/${LOCAL_VER}-to-${REMOTE_VER}-$(date +%Y%m%d-%H%M%S).tar.gz"
+    mkdir -p "$BACKUP_DIR"
+    grep -v '/$' "$LIST" | grep -v -x -F "$POST_MEMBER" > "$TEMP_DIR/files.txt" || true
+    if tar -czpf "$BACKUP" -C "$ROOT_DIR" --ignore-failed-read -T "$TEMP_DIR/files.txt" 2>/dev/null; then
+        echo "[+] Резервная копия заменяемых файлов: $BACKUP"
+    else
+        echo "[~] Не удалось создать резервную копию (продолжаем без неё)."
+        BACKUP=""
+    fi
+
+    # 8. Распаковка архива в системный корень /
+    # --no-same-owner: файлы получают владельца root, даже если архив собран под другим uid
+    # --no-overwrite-dir: права существующих системных каталогов не перезаписываются
+    echo "[4/5] Применение обновлений в корень системы (/)..."
+    tar -xzpf "$ARCHIVE" -C "$ROOT_DIR" --no-same-owner --no-overwrite-dir "${EXCLUDE_ARGS[@]}"
+
+    # 9. Выполнение пост-скрипта (если он входит в обновление)
+    if [ -n "$POST_MEMBER" ]; then
+        echo "[5/5] Запуск пост-установочных скриптов..."
+        if ! bash "$TEMP_DIR/post/$POST_MEMBER"; then
+            echo "[!] Пост-установочный скрипт завершился с ошибкой."
+        fi
+    else
+        echo "[5/5] Пост-скрипты не требуются."
+    fi
+
+    # 10. Проверяем, что версия действительно изменилась на ожидаемую
+    NEW_VER=$(get_release "$MINT_INFO_FILE")
+    if [ "$NEW_VER" != "$REMOTE_VER" ]; then
+        echo "[!] После обновления версия системы: ${NEW_VER:-неизвестна}, ожидалась $REMOTE_VER."
+        echo "    Вероятно, архив $ARCHIVE_NAME подготовлен неверно или не содержит новый файл версии."
+        if [ -n "$BACKUP" ]; then
+            echo "    Резервная копия заменённых файлов: $BACKUP"
+        fi
+        exit 1
+    fi
+
+    echo "=== PerforatorOS успешно обновлена до версии $REMOTE_VER! ==="
+}
+
+# Читает значение RELEASE= из файла версии
+get_release() {
+    if [ -f "$1" ]; then
+        grep -m 1 '^RELEASE=' "$1" | cut -d= -f2 | tr -d "\"' \r" || true
+    fi
+}
+
+# Всё тело скрипта разобрано как функция до запуска, поэтому обновление
+# самого файла в процессе работы не сломает выполнение.
+main "$@"; exit $?
